@@ -1,18 +1,20 @@
+#define _SS_MAX_RX_BUFF 256
+#define RX_PIN 2  // GPIO2 for SoftwareSerial RX
+#define TX_PIN 0  // GPIO0 for SoftwareSerial TX
+#include <SoftwareSerial.h>
+SoftwareSerial arduinoSerial(RX_PIN, TX_PIN);  // RX, TX
+
 #include <ESP8266WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <EEPROM.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
-#include <SoftwareSerial.h>
 
-#define RX_PIN 2  // GPIO2 for SoftwareSerial RX
-#define TX_PIN 0  // GPIO0 for SoftwareSerial TX
-
-SoftwareSerial arduinoSerial(RX_PIN, TX_PIN);  // RX, TX
 
 #define EEPROM_SIZE 512
 #define SSID_LENGTH 32
 #define PASSWORD_LENGTH 64
+
 
 AsyncWebServer server(80);
 WiFiClient espClient;
@@ -158,6 +160,20 @@ void connectToMQTT() {
   }
 }
 
+String readFullMessage() {
+  String message = "";
+  unsigned long timeout = millis() + 500;  // 500ms timeout
+  while (millis() < timeout) {
+    if (arduinoSerial.available()) {
+      char c = arduinoSerial.read();
+      message += c;
+      if (c == '\n') break;
+    }
+  }
+  message.trim();  // Remove trailing whitespace
+  return message;
+}
+
 void loop() {
   if (WiFi.status() != WL_CONNECTED && ssid != "" && password != "") {
     Serial.println("Wi-Fi Disconnected! Reconnecting...");
@@ -170,12 +186,12 @@ void loop() {
   }
 
   if (arduinoSerial.available()) {
-    String message = arduinoSerial.readStringUntil('\n');  // Read JSON data
+    String message = readFullMessage();
+    Serial.print("Received length: ");
+    Serial.println(message.length());
+    Serial.println("Received: [" + message + "]");
 
-    Serial.println(message);
-
-    // Parse JSON data
-    StaticJsonDocument<200> doc;
+    StaticJsonDocument<256> doc;
     DeserializationError error = deserializeJson(doc, message);
 
     if (error) {
@@ -184,18 +200,11 @@ void loop() {
       return;
     }
 
-    // Extract the data
-    float temperature = doc["temperature"];
-    float humidity = doc["humidity"];
-
-    // Prepare the MQTT message
     String mqttMessage = message;
-
-    // Send the data to the MQTT broker
-    client.publish(mqttTopic, mqttMessage.c_str());
-    Serial.println("Data sent to MQTT: " + mqttMessage);
+    if (client.publish(mqttTopic, mqttMessage.c_str())) {
+      Serial.println("Data sent to MQTT: " + mqttMessage);
+    } else {
+      Serial.println("MQTT publish failed");
+    }
   }
-
-  delay(2000);
-  client.loop();
 }
