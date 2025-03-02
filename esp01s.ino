@@ -1,210 +1,227 @@
-#define _SS_MAX_RX_BUFF 256
-#define RX_PIN 2  // GPIO2 for SoftwareSerial RX
-#define TX_PIN 0  // GPIO0 for SoftwareSerial TX
-#include <SoftwareSerial.h>
-SoftwareSerial arduinoSerial(RX_PIN, TX_PIN);  // RX, TX
-
 #include <ESP8266WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <EEPROM.h>
 #include <PubSubClient.h>
 #include <ArduinoJson.h>
 
-
+// Configuration constants
 #define EEPROM_SIZE 512
 #define SSID_LENGTH 32
 #define PASSWORD_LENGTH 64
+#define MQTT_RECONNECT_DELAY 5000
+#define SERIAL_TIMEOUT 500
 
-
+// Global objects
 AsyncWebServer server(80);
 WiFiClient espClient;
 PubSubClient client(espClient);
-const char* mqttServer = "192.168.0.167";
-const char* mqttTopic = "WeatherStation";
 
-String ssid;
-String password;
+// Network configuration
+struct NetworkConfig {
+  String ssid;
+  String password;
+  const char* mqttServer = "192.168.0.167";
+  const char* mqttTopic = "WeatherStation";
+  const char* clientId = "ESP01S_Client";
+} config;
 
-// Function to read a string from EEPROM
+// EEPROM utility functions
+void writeEEPROMString(int start, int maxLength, const String& value) {
+  for (int i = 0; i < maxLength; i++) {
+    EEPROM.write(start + i, i < value.length() ? value[i] : 0);
+  }
+  EEPROM.commit();
+}
+
 String readEEPROMString(int start, int maxLength) {
   char buffer[maxLength + 1];
+  memset(buffer, 0, maxLength + 1);
   for (int i = 0; i < maxLength; i++) {
     buffer[i] = EEPROM.read(start + i);
-    if (buffer[i] == 0) break;  // Stop at null terminator
+    if (buffer[i] == 0) break;
   }
-  buffer[maxLength] = '\0';  // Ensure null termination
   return String(buffer);
 }
 
-void setup() {
-  Serial.begin(115200);       // ESP-01S uses 115200 by default
-  arduinoSerial.begin(9600);  // Adjust baud rate as needed
+// WiFi configuration AP
+void startConfigAP() {
+  const char* apSSID = "ESP-01S-Config";
+  const char* apPassword = "123456789";
+  WiFi.softAP(apSSID, apPassword);
+  Serial.printf("AP Started - SSID: %s, IP: %s\n", apSSID, WiFi.softAPIP().toString().c_str());
+}
 
-  EEPROM.begin(EEPROM_SIZE);
-  ssid = readEEPROMString(0, SSID_LENGTH);
-  password = readEEPROMString(SSID_LENGTH, PASSWORD_LENGTH);
-
-  if (ssid == "" || password == "") {
-    Serial.println("No Wi-Fi credentials found, awaiting configuration...");
-  }
-
-  WiFi.softAP("ESP-01S-Config", "123456789");
-  Serial.println("Access Point Started");
-  Serial.print("IP Address: ");
-  Serial.println(WiFi.softAPIP());
-
+// Web server handlers
+void setupWebServer() {
   server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
-    String html = "<!DOCTYPE html>"
-                  "<html lang=\"en\">"
-                  "<head>"
-                  "<meta charset=\"UTF-8\">"
-                  "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
-                  "<title>Wi-Fi Setup</title>"
-                  "<style>"
-                  "body { font-family: Arial, sans-serif; margin: 0; padding: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; background-color: #f4f4f4; }"
-                  ".container { width: 90%; max-width: 400px; padding: 20px; background-color: white; border-radius: 8px; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1); }"
-                  "h1 { text-align: center; font-size: 2em; margin-bottom: 20px; }"
-                  "label { font-size: 1.1em; margin-bottom: 8px; display: block; }"
-                  "input[type='text'], input[type='password'] { width: 95%; padding: 10px; margin-bottom: 15px; border-radius: 4px; border: 1px solid #ccc; }"
-                  "input[type='submit'] { width: 100%; padding: 10px; background-color: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 1.2em; }"
-                  "input[type='submit']:hover { background-color: #45a049; }"
-                  "</style>"
-                  "</head>"
-                  "<body>"
-                  "<div class=\"container\">"
-                  "<h1>Wi-Fi Setup</h1>"
-                  "<form action=\"/save\" method=\"POST\">"
-                  "<label for=\"ssid\">SSID:</label>"
-                  "<input type=\"text\" id=\"ssid\" name=\"ssid\">"
-                  "<label for=\"password\">Password:</label>"
-                  "<input type=\"password\" id=\"password\" name=\"password\">"
-                  "<input type=\"submit\" value=\"Save\">"
-                  "</form>"
-                  "</div>"
-                  "</body>"
-                  "</html>";
-
+    String html = R"(
+      <!DOCTYPE html>
+      <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Wi-Fi Setup</title>
+        <style>
+          body {font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f4f4f4;}
+          .container {max-width: 400px; margin: 0 auto; padding: 20px; background: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);}
+          h1 {text-align: center; color: #333;}
+          label {display: block; margin: 10px 0 5px; color: #666;}
+          input[type="text"], input[type="password"] {width: 100%; padding: 8px; margin-bottom: 15px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box;}
+          input[type="submit"] {width: 100%; padding: 10px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;}
+          input[type="submit"]:hover {background: #45a049;}
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h1>Wi-Fi Setup</h1>
+          <form action="/save" method="POST">
+            <label for="ssid">SSID:</label>
+            <input type="text" id="ssid" name="ssid" required maxlength="32">
+            <label for="password">Password:</label>
+            <input type="password" id="password" name="password" required maxlength="64">
+            <input type="submit" value="Save">
+          </form>
+        </div>
+      </body>
+      </html>
+    )";
     request->send(200, "text/html", html);
   });
 
   server.on("/save", HTTP_POST, [](AsyncWebServerRequest* request) {
-    if (request->hasParam("ssid", true) && request->hasParam("password", true)) {
-      ssid = request->getParam("ssid", true)->value();
-      password = request->getParam("password", true)->value();
-
-      // Write SSID to EEPROM
-      for (int i = 0; i < SSID_LENGTH; i++) {
-        if (i < ssid.length()) {
-          EEPROM.write(i, ssid[i]);
-        } else {
-          EEPROM.write(i, 0);  // Null padding
-        }
-      }
-
-      // Write password to EEPROM
-      for (int i = 0; i < PASSWORD_LENGTH; i++) {
-        if (i < password.length()) {
-          EEPROM.write(SSID_LENGTH + i, password[i]);
-        } else {
-          EEPROM.write(SSID_LENGTH + i, 0);  // Null padding
-        }
-      }
-      EEPROM.commit();
-
-      // Send a more detailed response
-      String response = "<!DOCTYPE html>"
-                        "<html>"
-                        "<head><meta charset=\"UTF-8\"><title>Setup Complete</title></head>"
-                        "<body>"
-                        "<h1>Credentials Saved</h1>"
-                        "<p>The device is rebooting now. Please wait 5-10 seconds, then connect to your Wi-Fi network.</p>"
-                        "</body>"
-                        "</html>";
-      request->send(200, "text/html", response);
-
-      // Give the client time to receive the response before restarting
-      delay(2000);  // Increased from 1000 to 2000 ms
-      ESP.restart();
-    } else {
-      // Handle case where parameters are missing
-      request->send(400, "text/html", "<h1>Error</h1><p>Missing SSID or password.</p>");
+    if (!request->hasParam("ssid", true) || !request->hasParam("password", true)) {
+      request->send(400, "text/html", "<h1>Error</h1><p>Missing credentials</p>");
+      return;
     }
+
+    config.ssid = request->getParam("ssid", true)->value();
+    config.password = request->getParam("password", true)->value();
+
+    if (config.ssid.length() > SSID_LENGTH || config.password.length() > PASSWORD_LENGTH) {
+      request->send(400, "text/html", "<h1>Error</h1><p>Credentials too long</p>");
+      return;
+    }
+
+    writeEEPROMString(0, SSID_LENGTH, config.ssid);
+    writeEEPROMString(SSID_LENGTH, PASSWORD_LENGTH, config.password);
+
+    request->send(200, "text/html", R"(
+      <h1>Success</h1>
+      <p>Credentials saved. Rebooting in 2 seconds...</p>
+    )");
+
+    delay(2000);
+    ESP.restart();
   });
 
   server.begin();
+  Serial.println("Web server started");
+}
 
-  if (ssid != "" && password != "") {
-    WiFi.begin(ssid.c_str(), password.c_str());
-    Serial.println("Connecting to Wi-Fi...");
-    while (WiFi.status() != WL_CONNECTED) {
-      delay(1000);
-      Serial.print(".");
-    }
-    Serial.println("Connected!");
+// Network connection functions
+bool connectToWiFi() {
+  if (config.ssid.isEmpty() || config.password.isEmpty()) return false;
+
+  WiFi.begin(config.ssid.c_str(), config.password.c_str());
+  Serial.print("Connecting to WiFi");
+
+  int attempts = 0;
+  const int maxAttempts = 20;
+  while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
   }
 
-  client.setServer(mqttServer, 1883);
-  connectToMQTT();
+  Serial.println();
+  return WiFi.status() == WL_CONNECTED;
 }
 
 void connectToMQTT() {
+  client.setServer(config.mqttServer, 1883);
   while (!client.connected() && WiFi.status() == WL_CONNECTED) {
-    Serial.print("Connecting to MQTT...");
-    if (client.connect("ESP01S_Client")) {
-      Serial.println("Connected!");
-      client.publish("home_esp01s/status", "ESP-01S connected to MQTT!");
+    Serial.printf("Connecting to MQTT (%s)... ", config.mqttServer);
+    if (client.connect(config.clientId)) {
+      Serial.println("connected");
+      client.publish("home_esp01s/status", "ESP-01S connected to MQTT");
     } else {
-      Serial.println("Failed, retrying in 5 sec...");
-      delay(5000);
+      Serial.printf("failed (rc=%d), retrying in %dms\n", client.state(), MQTT_RECONNECT_DELAY);
+      delay(MQTT_RECONNECT_DELAY);
     }
   }
 }
 
-String readFullMessage() {
-  String message = "";
-  unsigned long timeout = millis() + 500;  // 500ms timeout
+// Serial data handling
+String readSerialData() {
+  String data;
+  unsigned long timeout = millis() + SERIAL_TIMEOUT;
+
   while (millis() < timeout) {
-    if (arduinoSerial.available()) {
-      char c = arduinoSerial.read();
-      message += c;
+    if (Serial.available()) {
+      char c = Serial.read();
+      data += c;
       if (c == '\n') break;
     }
+    yield();  // Prevent watchdog reset
   }
-  message.trim();  // Remove trailing whitespace
-  return message;
+  data.trim();
+  return data;
+}
+
+void processSerialData() {
+  String message = readSerialData();
+  if (message.isEmpty()) return;
+
+  StaticJsonDocument<384> doc;
+  DeserializationError error = deserializeJson(doc, message);
+
+  if (error) {
+    Serial.printf("JSON parse error: %s\n", error.c_str());
+    return;
+  }
+
+  if (client.publish(config.mqttTopic, message.c_str())) {
+    Serial.printf("Published to %s: %s\n", config.mqttTopic, message.c_str());
+    client.publish("home_esp01s/status", "ESP-01S entering deep sleep");
+    ESP.deepSleep(0);
+  } else {
+    Serial.println("MQTT publish failed");
+  }
+}
+
+void setup() {
+  Serial.begin(9600);
+  EEPROM.begin(EEPROM_SIZE);
+
+  config.ssid = readEEPROMString(0, SSID_LENGTH);
+  config.password = readEEPROMString(SSID_LENGTH, PASSWORD_LENGTH);
+
+  if (config.ssid.isEmpty() || config.password.isEmpty()) {
+    startConfigAP();
+    setupWebServer();
+  } else if (connectToWiFi()) {
+    Serial.printf("Connected to %s (IP: %s)\n", config.ssid.c_str(), WiFi.localIP().toString().c_str());
+    connectToMQTT();
+  } else {
+    Serial.println("WiFi connection failed, starting config mode");
+    startConfigAP();
+    setupWebServer();
+  }
 }
 
 void loop() {
-  if (WiFi.status() != WL_CONNECTED && ssid != "" && password != "") {
-    Serial.println("Wi-Fi Disconnected! Reconnecting...");
-    WiFi.begin(ssid.c_str(), password.c_str());
-    delay(1000);
+  if (WiFi.status() != WL_CONNECTED && !config.ssid.isEmpty()) {
+    Serial.println("WiFi disconnected, attempting reconnect...");
+    connectToWiFi();
   }
 
   if (!client.connected() && WiFi.status() == WL_CONNECTED) {
     connectToMQTT();
   }
 
-  if (arduinoSerial.available()) {
-    String message = readFullMessage();
-    Serial.print("Received length: ");
-    Serial.println(message.length());
-    Serial.println("Received: [" + message + "]");
+  client.loop();
 
-    StaticJsonDocument<256> doc;
-    DeserializationError error = deserializeJson(doc, message);
-
-    if (error) {
-      Serial.print("Failed to parse JSON: ");
-      Serial.println(error.c_str());
-      return;
-    }
-
-    String mqttMessage = message;
-    if (client.publish(mqttTopic, mqttMessage.c_str())) {
-      Serial.println("Data sent to MQTT: " + mqttMessage);
-    } else {
-      Serial.println("MQTT publish failed");
-    }
+  if (Serial.available()) {
+    processSerialData();
   }
 }
