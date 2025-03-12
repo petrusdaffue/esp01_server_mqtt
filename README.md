@@ -39,7 +39,7 @@ This project configures an ESP8266 microcontroller as a Wi-Fi and MQTT controlle
 
 #### MQTT Integration
 
-- The device automatically connects to the MQTT server at `192.168.0.167`.
+- The device automatically connects to the MQTT server at `192.168.0.167`. (Update this or include it on the web page to make this configurable)
 - It subscribes to and publishes messages on the topic `WeatherStation`.
 
 ### Customization
