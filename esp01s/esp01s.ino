@@ -20,8 +20,8 @@ PubSubClient client(espClient);
 struct NetworkConfig {
   String ssid;
   String password;
-  const char* mqttServer = "192.168.0.167";
-  const char* mqttTopic = "WeatherStation";
+  String mqttServer;
+  String mqttTopic;
   const char* clientId = "ESP01S_Client";
 } config;
 
@@ -73,12 +73,20 @@ void setupWebServer() {
       </head>
       <body>
         <div class="container">
-          <h1>Wi-Fi Setup</h1>
+          <h1>Wi-Fi & MQTT Setup</h1>
           <form action="/save" method="POST">
             <label for="ssid">SSID:</label>
-            <input type="text" id="ssid" name="ssid" required maxlength="32">
+            <input type="text" id="ssid" name="ssid" required maxlength="32" value=")"
+                  + config.ssid + R"(">
             <label for="password">Password:</label>
-            <input type="password" id="password" name="password" required maxlength="64">
+            <input type="password" id="password" name="password" required maxlength="64" value=")"
+                  + config.password + R"(">
+            <label for="mqttServer">MQTT Server:</label>
+            <input type="text" id="mqttServer" name="mqttServer" required maxlength="64" value=")"
+                  + config.mqttServer + R"(">
+            <label for="mqttTopic">MQTT Topic:</label>
+            <input type="text" id="mqttTopic" name="mqttTopic" required maxlength="64" value=")"
+                  + config.mqttTopic + R"(">
             <input type="submit" value="Save">
           </form>
         </div>
@@ -89,25 +97,30 @@ void setupWebServer() {
   });
 
   server.on("/save", HTTP_POST, [](AsyncWebServerRequest* request) {
-    if (!request->hasParam("ssid", true) || !request->hasParam("password", true)) {
-      request->send(400, "text/html", "<h1>Error</h1><p>Missing credentials</p>");
+    if (!request->hasParam("ssid", true) || !request->hasParam("password", true) || !request->hasParam("mqttServer", true) || !request->hasParam("mqttTopic", true)) {
+      request->send(400, "text/html", "<h1>Error</h1><p>Missing credentials or MQTT settings</p>");
       return;
     }
 
     config.ssid = request->getParam("ssid", true)->value();
     config.password = request->getParam("password", true)->value();
+    config.mqttServer = request->getParam("mqttServer", true)->value();
+    config.mqttTopic = request->getParam("mqttTopic", true)->value();
 
-    if (config.ssid.length() > SSID_LENGTH || config.password.length() > PASSWORD_LENGTH) {
-      request->send(400, "text/html", "<h1>Error</h1><p>Credentials too long</p>");
+    if (config.ssid.length() > SSID_LENGTH || config.password.length() > PASSWORD_LENGTH || config.mqttServer.length() > 64 || config.mqttTopic.length() > 64) {
+      request->send(400, "text/html", "<h1>Error</h1><p>Input too long</p>");
       return;
     }
 
+    // Write updated values to EEPROM
     writeEEPROMString(0, SSID_LENGTH, config.ssid);
     writeEEPROMString(SSID_LENGTH, PASSWORD_LENGTH, config.password);
+    writeEEPROMString(SSID_LENGTH + PASSWORD_LENGTH, 64, config.mqttServer);
+    writeEEPROMString(SSID_LENGTH + PASSWORD_LENGTH + 64, 64, config.mqttTopic);
 
     request->send(200, "text/html", R"(
       <h1>Success</h1>
-      <p>Credentials saved. Rebooting in 2 seconds...</p>
+      <p>Credentials and MQTT settings saved. Rebooting in 2 seconds...</p>
     )");
 
     delay(2000);
@@ -138,9 +151,9 @@ bool connectToWiFi() {
 }
 
 void connectToMQTT() {
-  client.setServer(config.mqttServer, 1883);
+  client.setServer(config.mqttServer.c_str(), 1883);
   while (!client.connected() && WiFi.status() == WL_CONNECTED) {
-    Serial.printf("Connecting to MQTT (%s)... ", config.mqttServer);
+    Serial.printf("Connecting to MQTT (%s)... ", config.mqttServer.c_str());
     if (client.connect(config.clientId)) {
       Serial.println("connected");
       client.publish("home_esp01s/status", "ESP-01S connected to MQTT");
@@ -180,8 +193,8 @@ void processSerialData() {
     return;
   }
 
-  if (client.publish(config.mqttTopic, message.c_str())) {
-    Serial.printf("Published to %s: %s\n", config.mqttTopic, message.c_str());
+  if (client.publish(config.mqttTopic.c_str(), message.c_str())) {
+    Serial.printf("Published to %s: %s\n", config.mqttTopic.c_str(), message.c_str());
     client.publish("home_esp01s/status", "ESP-01S entering deep sleep");
     ESP.deepSleep(0);
   } else {
@@ -195,6 +208,8 @@ void setup() {
 
   config.ssid = readEEPROMString(0, SSID_LENGTH);
   config.password = readEEPROMString(SSID_LENGTH, PASSWORD_LENGTH);
+  config.mqttServer = readEEPROMString(SSID_LENGTH + PASSWORD_LENGTH, 64);
+  config.mqttTopic = readEEPROMString(SSID_LENGTH + PASSWORD_LENGTH + 64, 64);
 
   if (config.ssid.isEmpty() || config.password.isEmpty()) {
     startConfigAP();
